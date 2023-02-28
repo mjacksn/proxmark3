@@ -19,6 +19,8 @@
 #include "cmdhfntag424.h"
 #include <ctype.h>
 #include "cmdparser.h"
+#include "cmdhf14a.h"
+#include "iso7816/apduinfo.h"  // GetAPDUCodeDescription
 #include "commonutil.h"
 #include "protocols.h"
 #include "cliparser.h"
@@ -169,7 +171,7 @@ static int CmdHF_ntag424_info(const char *Cmd) {
         arg_param_begin,
         arg_param_end
     };
-    CLIExecWithReturn(ctx, Cmd, argtable, false);
+    CLIExecWithReturn(ctx, Cmd, argtable, true);
     CLIParserFree(ctx);
 
     PrintAndLogEx(INFO, "not implemented yet");
@@ -177,18 +179,53 @@ static int CmdHF_ntag424_info(const char *Cmd) {
 
 
     // has hardcoded application and three files.
+    //activate 14443-4 mode
+    SendCommandMIX(CMD_HF_ISO14443A_READER, ISO14A_CONNECT, 0, 0, NULL, 0);
+    PacketResponseNG resp;
+    WaitForResponse(CMD_ACK, &resp);
 
+    // Check if the tag reponds to APDUs.
+    uint8_t info_part_one[9];
+    int info_part_one_len = 0;
+    uint8_t aGET_VER[80];
+    int aGET_VER_n = 0;
+    param_gethex_to_eol("9060000000", 0, aGET_VER, sizeof(aGET_VER), &aGET_VER_n);
+    int res = ExchangeAPDU14a(aGET_VER, aGET_VER_n, true, true, info_part_one, sizeof(info_part_one), &info_part_one_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to GetVersion part 1 APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "GetVersion part 1 APDU Response: %s", sprint_hex_inrow(info_part_one, info_part_one_len));
+    }
+    
+    uint8_t info_part_two[9];
+    int info_part_two_len = 0;
+    uint8_t aGET_VER_TWO[80];
+    int aGET_VER_TWO_n = 0;
+    param_gethex_to_eol("90AF000000", 0, aGET_VER_TWO, sizeof(aGET_VER_TWO), &aGET_VER_TWO_n);
+    res = ExchangeAPDU14a(aGET_VER_TWO, aGET_VER_TWO_n, false, true, info_part_two, sizeof(info_part_two), &info_part_two_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to GetVersion part 2 APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "GetVersion part 2 APDU Response: %s", sprint_hex_inrow(info_part_two, info_part_two_len));
+    }
 
-    /*
-        // Check if the tag reponds to APDUs.
-        PrintAndLogEx(INFO, "Sending a test APDU (select file command) to check if the tag is responding to APDU");
-        param_gethex_to_eol("00a404000aa000000440000101000100", 0, aSELECT_AID, sizeof(aSELECT_AID), &aSELECT_AID_n);
-        int res = ExchangeAPDU14a(aSELECT_AID, aSELECT_AID_n, true, false, response, sizeof(response), &response_n);
-        if (res != PM3_SUCCESS) {
-            PrintAndLogEx(FAILED, "Tag did not respond to a test APDU (select file command). Aborting...");
-            return res;
-        }
-    */
+    uint8_t info_part_three[17];
+    int info_part_three_len = 0;
+    uint8_t aGET_VER_THREE[80];
+    int aGET_VER_THREE_n = 0;
+    param_gethex_to_eol("90AF000000", 0, aGET_VER_THREE, sizeof(aGET_VER_THREE), &aGET_VER_THREE_n);
+    res = ExchangeAPDU14a(aGET_VER_THREE, aGET_VER_THREE_n, false, false, info_part_three, sizeof(info_part_three), &info_part_three_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to GetVersion part 3 APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "GetVersion part 3 APDU Response: %s", sprint_hex_inrow(info_part_three, info_part_three_len));
+    }
+
+    
+
 
     return PM3_SUCCESS;
 }
