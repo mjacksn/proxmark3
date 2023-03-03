@@ -35,30 +35,173 @@
 static int CmdHelp(const char *Cmd);
 
 typedef enum {
+    NTAG424_AES,
+    NTAG424_LRP,
+} ntag424_auth_type_t;
+
+typedef enum {
+    NTAG424_KEY_APP_MASTER = 0x00,
+    NTAG424_KEY_APP,
+    NTAG424_SDM_META_READ,
+    NTAG424_SDM_FILE_READ,
+    NTAG424_ORIGINALITY
+} ntag424_key_type_t;
+
+typedef enum {
     NTAG413DNA,
     NTAG424DNA,
     NTAG424DNATT,
     UNKNOWN_TYPE
 } nxp_cardtype_t;
 
-typedef struct ntag424_get_version_res {
-    uint8_t isOK;
-    uint8_t uid[7];
-    uint8_t uidlen;
-    uint8_t versionHW[7];
-    uint8_t versionSW[7];
-    uint8_t details[14];
-} PACKED ntag424_get_version_res;
+typedef struct {
+    bool Authenticated;
+    uint8_t Key[16];
+    uint8_t KeyNum;
+    uint8_t RndA[16];
+    uint8_t RndB[16];
+    uint8_t TI[4];
+    uint8_t PICCap2[6];
+    uint8_t PCDCap2[6];
+    uint8_t Kenc[16];
+    uint8_t Kmac[16];
+    uint16_t Cmd_Ctr;
+} ntag424session_t;
+
+typedef struct {
+    uint8_t  key_number;
+    uint8_t  file_id;
+    uint8_t  read_access;
+    uint8_t  read_write_access;
+    uint8_t  write_access;
+    uint8_t  change_access;
+    uint8_t  SDMMetaRead;
+    uint8_t  SDMFileRead;
+    uint8_t  SDMCtrRet;
+    ntag424_comm_mode_t comm_mode;
+    uint16_t file_size;
+
+} file_properties_t;
+
+typedef enum ntag424_comm_mode {
+    NTAG424_COMM_MODE_PLAIN = 0x00,
+    NTAG424_COMM_MODE_MACED = 0x01,
+    NTAG424_COMM_MODE_ENC = 0x03,
+} ntag424_comm_mode_t;
+
+// ntag424_get_version_res struct
+typedef struct {
+    uint8_t  versionHW[7];
+    uint8_t  versionSW[7];
+    uint8_t  details[14];
+    uint8_t  uid[7];
+    int      uid_len;
+} ntag424_get_version_res;
+
+static char *GetSDMMetaReadStr(uint8_t access_condition) {
+
+    static char buf[40] = {0x00};
+    char *retStr = buf;
+
+    switch(access_condition) {
+        case 0x00:
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _GREEN_("Key 0x%02X used to encrypt PICCData") " )", access_condition, access_condition);
+            break;
+        case 0x0E:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _GREEN_("Plain PICCData mirroring") " )", access_condition);
+            break;
+        case 0x0F:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _GREEN_("No PICCData mirroring") " )", access_condition);
+            break;
+        default:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _RED_("Unknown") " )", access_condition);
+            break;
+    }
+
+    return buf;
+}
+
+static char *GetSDMFileReadStr(uint8_t access_condition) {
+
+    static char buf[40] = {0x00};
+    char *retStr = buf;
+
+    switch(access_condition) {
+        case 0x00:
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _GREEN_("Free access, key 0x%02X applied for SDM") " )", access_condition, access_condition);
+            break;
+        case 0x0E:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _YELLOW_("RFU") " )", access_condition);
+            break;
+        case 0x0F:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _GREEN_("No SDM for reading") " )", access_condition);
+            break;
+        default:
+            snprintf(retStr, sizeof(buf), "0x%02X ( " _RED_("Unknown") " )", access_condition);
+            break;
+    }
+
+    return buf;
+}
 
 //
 // Original from  https://github.com/rfidhacking/node-sdm/
 //
-typedef struct sdm_picc_s {
-    uint8_t tag;
-    uint8_t uid[7];
-    uint8_t cnt[3];
+typedef struct {
+    uint8_t  tag;
+    uint8_t  uid[7];
+    uint8_t  cnt[3];
     uint32_t cnt_int;
+    uint8_t  uid_len;
 } sdm_picc_t;
+
+typedef struct {
+    bool    uid_mirror;
+    bool    cnt_mirror;
+    uint8_t uid_len;
+} picc_tag_t;
+
+static picc_tag_t interpret_picc_tag(uint8_t tag) {
+    picc_tag_t o = {0};
+    o.uid_mirror = (tag & 0x80) >> 7;
+    o.cnt_mirror = (tag & 0x40) >> 6;
+    o.uid_len = o.uid_mirror ? tag & 0x0F : 0;
+
+    return o;
+}
+
+
+static int NTAG424_AuthenticateEV2First(ntag424_get_version_res *res, ntag424session_t *session) {
+
+    uint8_t cmd[16] = {0};
+    uint8_t resp[16] = {0};
+    uint8_t iv[16] = {0};
+    uint8_t aesk [16] = {0};
+    uint8_t aeskey[16] = {0};
+    uint8_t PICCData[16] = {0};
+
+    // 1. Generate AES key
+
+
+    // 2. Encrypt AES key with AES-128-ECB using the key 0x00
+    //    (the default key for the NTAG424DNx0EV2)
+    //    and store the result in the AESK variable
+    //    (AESK = AES-128-ECB(0x00, AESkey))
+    memcpy(aesk, aeskey, 16);
+    if (mbedtls_aes_setkey_enc(&aes_ctx, aeskey, 128) != 0) {
+        PrintAndLogEx(ERR, "AES-128-ECB setkey_enc failed");
+        return PM3_EFAILED;
+    }
+
+}
 
 static int sdm_generator(void) {
 
@@ -70,9 +213,9 @@ static int sdm_generator(void) {
 
     // SMD / CMAC
     uint8_t iv[16] = {0};
-    uint8_t aeskey[16]  = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    // uint8_t enc_txt[16] = {0xEF, 0x96, 0x3F, 0xF7, 0x82, 0x86, 0x58, 0xA5, 0x99, 0xF3, 0x04, 0x15, 0x10, 0x67, 0x1E, 0x88};
-    uint8_t enc_txt[16] = {0xe6, 0x45, 0xb6, 0x15, 0x4e, 0x8f, 0x32, 0x7d, 0xfb, 0xab, 0x93, 0x4d, 0x4c, 0x66, 0x46, 0x14};
+    uint8_t aeskey[16]  = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    //uint8_t enc_txt[16] = {0xEF, 0x96, 0x3F, 0xF7, 0x82, 0x86, 0x58, 0xA5, 0x99, 0xF3, 0x04, 0x15, 0x10, 0x67, 0x1E, 0x88};
+    uint8_t enc_txt[16] = {0x15, 0x12, 0xD1, 0x87, 0x9E, 0x5F, 0xAE, 0x5B, 0x90, 0x54, 0xFA, 0xAA, 0x94, 0xA2, 0xC6, 0xF4};
     uint8_t dec_txt[16] = {0};
 
     aes_decode(iv, aeskey, enc_txt, dec_txt, sizeof(enc_txt));
@@ -83,23 +226,44 @@ static int sdm_generator(void) {
 
     sdm_picc_t o = {0};
     o.tag  = dec_txt[0];
-    memcpy(o.uid, dec_txt + 1, sizeof(o.uid));
-    memcpy(o.cnt, dec_txt + 8, sizeof(o.cnt));
-    o.cnt_int = MemLeToUint3byte(o.cnt);
+    picc_tag_t t = interpret_picc_tag(o.tag);
+    if(t.uid_mirror) {
+        PrintAndLogEx(INFO, "UID is mirrored");
+        PrintAndLogEx(INFO, "UID len.... %u", t.uid_len);
+        o.uid_len = t.uid_len;
+        memcpy(o.uid, dec_txt + 1, t.uid_len);
+    }
+
+    uint8_t cnt_offset = 1 + t.uid_len;
+
+    if(t.cnt_mirror) {
+        PrintAndLogEx(INFO, "CNT is mirrored");
+        
+        memcpy(o.cnt, dec_txt + cnt_offset, sizeof(o.cnt));
+        o.cnt_int = MemLeToUint3byte(o.cnt);
+    }
 
     PrintAndLogEx(INFO, "Decypted text");
     PrintAndLogEx(INFO, "  Tag........... 0x%02X", o.tag);
-    PrintAndLogEx(INFO, "  UID........... %s", sprint_hex(o.uid, sizeof(o.uid)));
-    PrintAndLogEx(INFO, "  Count bytes... %s", sprint_hex(o.cnt, sizeof(o.cnt)));
-    PrintAndLogEx(INFO, "  Count value... 0x%X ( %u )", o.cnt_int, o.cnt_int);
+    if(t.uid_mirror) {
+        PrintAndLogEx(INFO, "  UID........... %s", sprint_hex(o.uid, sizeof(o.uid)));
+        PrintAndLogEx(INFO, "  Count bytes... %s", sprint_hex(o.cnt, sizeof(o.cnt)));
+    }
+    if(t.cnt_mirror) {
+        PrintAndLogEx(INFO, "  Count value... 0x%X ( %u )", o.cnt_int, o.cnt_int);
+    }
 
     // SV2 as per NXP DS465430 (NT4H2421Gx Data sheet)
     uint8_t sv2data[16] = {0x3C, 0xC3, 0x00, 0x01, 0x00, 0x80};
 
-    memcpy(sv2data + 6, o.uid, sizeof(o.uid));
-    memcpy(sv2data + 6 + sizeof(o.uid), o.cnt, sizeof(o.cnt));
+    if(t.uid_mirror) {
+        memcpy(sv2data + 6, o.uid, o.uid_len);
+    }
+    if(t.cnt_mirror) {
+        memcpy(sv2data + 6 + o.uid_len, o.cnt, sizeof(o.cnt));
+    }
 
-    uint8_t cmackey[16] = {0};
+    uint8_t cmackey[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     mbedtls_aes_cmac_prf_128(aeskey, 16, sv2data, sizeof(sv2data), cmackey);
 
     uint8_t zero[16] = {0};
@@ -111,8 +275,8 @@ static int sdm_generator(void) {
         cmac[i] = full_cmac[j];
     }
 
-    //uint8_t veri[] = {0x94, 0xee, 0xd9, 0xee, 0x65, 0x33, 0x70, 0x86};
-    uint8_t veri[] = {0x8b, 0xa1, 0xfb, 0x47, 0x0d, 0x63, 0x39, 0xe8 };
+    uint8_t veri[] = {0x9F, 0x90, 0xBC, 0xE9, 0xB8, 0x6F, 0xB2, 0x82};
+    //uint8_t veri[] = {0x8B, 0x8D, 0x37, 0xC0, 0xAE, 0x6D, 0x8C, 0x8B};
     uint8_t is_ok = (memcmp(cmac, veri, 8) == 0);
 
     PrintAndLogEx(INFO, "SDM cmac... %s ( %s )",
@@ -278,7 +442,7 @@ static int ntag424_get_info(ntag424_get_version_res *info) {
 
     memcpy(info->uid, response, 7);
 
-    info->uidlen = 7;
+    info->uid_len = 7;
 
     return PM3_SUCCESS;
 }
@@ -337,11 +501,151 @@ static int CmdHF_ntag424_sdm(const char *Cmd) {
     return sdm_generator();
 }
 
+static int ntag424_select_tag(void) {
+    uint8_t response[20];
+    int response_len = 0;
+
+    uint8_t aSELECT[80];
+    int aSELECT_n = 0;
+
+    param_gethex_to_eol("93FE000000", 0, aSELECT, sizeof(aSELECT), &aSELECT_n);
+    int res = ExchangeAPDU14a(aSELECT, aSELECT_n, true, true, response, sizeof(response), &response_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to Select APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "Select APDU Response: %s", sprint_hex_inrow(response, response_len));
+    }
+
+    return PM3_SUCCESS;
+}
+
+static int ntag424_select_and_auth(uint8_t *key) {
+    int res = ntag424_select_tag();
+    if (res != PM3_SUCCESS) {
+        return res;
+    }
+
+    uint8_t response[20];
+    int response_len = 0;
+
+    uint8_t aAUTH[80];
+    int aAUTH_n = 0;
+    param_gethex_to_eol("90AF000000", 0, aAUTH, sizeof(aAUTH), &aAUTH_n);
+    res = ExchangeAPDU14a(aAUTH, aAUTH_n, false, true, response, sizeof(response), &response_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to Authenticate APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "Authenticate APDU Response: %s", sprint_hex_inrow(response, response_len));
+    }
+
+    return PM3_SUCCESS;
+}
+
+static int ntag_424_read_ndef(uint8_t *key, uint8_t *ndef, size_t *ndef_len) {
+    int res = ntag424_select_and_auth(key);
+    if (res != PM3_SUCCESS) {
+        return res;
+    }
+
+    uint8_t response[20];
+    int response_len = 0;
+
+    uint8_t aREAD[80];
+    int aREAD_n = 0;
+    param_gethex_to_eol("90F50000010200", 0, aREAD, sizeof(aREAD), &aREAD_n);
+    res = ExchangeAPDU14a(aREAD, aREAD_n, false, false, response, sizeof(response), &response_len);
+    if (res != PM3_SUCCESS) {
+        PrintAndLogEx(FAILED, "Tag did not respond to Read NDEF APDU. Aborting...");
+        return res;
+    }else {
+        PrintAndLogEx(SUCCESS, "Read NDEF APDU Response: %s", sprint_hex_inrow(response, response_len));
+    }
+
+    memcpy(ndef, response, response_len);
+    *ndef_len = response_len;
+
+    return PM3_SUCCESS;
+}
+
+
+static int CmdHF_ntag424_ndefread(const char *Cmd) {
+    CLIParserContext *ctx;
+    CLIParserInit(&ctx, "hf ntag424 ndefread",
+                    "Get info about NXP NTAG424 DNA Family styled tag.",
+                    "hf ntag424 ndefread"
+                    "hf ntag424 ndefread -k ffffffffffffffff -> read NDEF data using key\n"
+                    "hf ntag424 ndefread -f myfilename -> save NDEF to file"
+                    );
+    void *argtable[] = {
+        arg_param_begin,
+        arg_lit0("v", "verbose", "Verbose output"),
+        arg_str0("k", "key", "<hex>", "Key to use for reading NDEF file (16 hex bytes)"),
+        arg_str0("f", "file", "<fn>", "Save raw NDEF to file"),
+        arg_param_end
+    };
+    CLIExecWithReturn(ctx, Cmd, argtable, true);
+
+    bool verbose = arg_get_lit(ctx, 1);
+    uint8_t key[16] = {0};
+    int keylen = 0;
+    CLIGetHexWithReturn(ctx, 2, key, &keylen);
+    uint8_t filename[FILE_PATH_SIZE] = {0};
+    int fnlen = 0;
+    CLIParamStrToBuf(arg_get_str(ctx, 3), (uint8_t *)filename, FILE_PATH_SIZE, &fnlen);
+
+    CLIParserFree(ctx);
+
+    //uint8_t response[PM3_CMD_DATA_SIZE] = {0};
+    //size_t response_len = 0;
+
+    ntag424_get_version_res info;
+    int res = ntag424_get_info(&info);
+    if (res != PM3_SUCCESS) {
+        return res;
+    }
+    
+    nxp_cardtype_t cardtype = getCardType(&info);
+    if(cardtype != NTAG424DNA && cardtype != NTAG424DNATT && cardtype != NTAG413DNA) {
+        PrintAndLogEx(ERR, "This command is only for NTAG424 DNA Family styled tags.");
+        return PM3_EINVARG;
+    }
+   
+
+   
+    //res = ntag424_select_auth(&info, key, keylen);
+
+    if (res != PM3_SUCCESS) {
+        return res;
+    }
+
+
+    
+    PrintAndLogEx(INFO, "Reading NDEF file");
+
+    
+
+    if(verbose) {
+        
+    }
+
+    if (keylen > 0) {
+        if (keylen != 16) {
+            PrintAndLogEx(ERR, "Key must be 16 hex bytes");
+            return PM3_EINVARG;
+        }
+        PrintAndLogEx(INFO, "Using key: %s", sprint_hex(key, 16));
+    }
+    
+    return PM3_SUCCESS;
+}
+
 static int CmdHF_ntag424_info(const char *Cmd) {
 
     CLIParserContext *ctx;
     CLIParserInit(&ctx, "hf ntag424 info",
-                  "Get info about NXP NTAG424 DNA Family styled tag.",
+                  "Get info about NXP NTAG424 DNA Family styled tag",
                   "hf ntag424 info"
                  );
     void *argtable[] = {
@@ -370,14 +674,14 @@ static int CmdHF_ntag424_info(const char *Cmd) {
 
     nxp_cardtype_t cardtype = getCardType(&info);
     if (cardtype == UNKNOWN_TYPE) {
-        PrintAndLogEx(INFO, "Card doesnt seem to be an NTAG 424");
+        PrintAndLogEx(INFO, "Card doesn't seem to be in the NXP NTAG424 DNA Family");
         DropField();
         return PM3_SUCCESS;
     }
 
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(INFO, "---------------------------------- " _CYAN_("Tag Information") " ----------------------------------");
-    PrintAndLogEx(SUCCESS, "              UID: " _GREEN_("%s"), sprint_hex(info.uid, info.uidlen));
+    PrintAndLogEx(SUCCESS, "              UID: " _GREEN_("%s"), sprint_hex(info.uid, info.uid_len));
     PrintAndLogEx(SUCCESS, "     Batch number: " _GREEN_("%s"), sprint_hex(info.details + 7, 5));
     PrintAndLogEx(SUCCESS, "  Production date: week " _GREEN_("%02x") " / " _GREEN_("20%02x"), info.details[12], info.details[13]);
 
@@ -406,22 +710,25 @@ static int CmdHF_ntag424_info(const char *Cmd) {
     PrintAndLogEx(INFO, "      Protocol: %s", getProtocolStr(info.versionSW[6], false));
     PrintAndLogEx(NORMAL, "");
   
+    sdm_generator();
 
     DropField();
 
     return PM3_SUCCESS;
 }
 
+
+
 //------------------------------------
 // Menu Stuff
 //------------------------------------
 static command_t CommandTable[] = {
-    {"help",     CmdHelp,                AlwaysAvailable,  "This help"},
-    {"-----------", CmdHelp,             IfPm3Iso14443a,   "----------------------- " _CYAN_("operations") " -----------------------"},
-    {"info",     CmdHF_ntag424_info,     IfPm3Iso14443a,   "Tag information"},
-//     {"ndefread", CmdHF_ntag424_sdm,      IfPm3Iso14443a,   "Prints NDEF records from card"},
-    {"sdm",      CmdHF_ntag424_sdm,      IfPm3Iso14443a,   "Prints NDEF records from card"},
-    {"view",     CmdHF_ntag424_view,     AlwaysAvailable,  "Display content from tag dump file"},
+    {"help",        CmdHelp,                    AlwaysAvailable,  "This help"},
+    {"-----------", CmdHelp,                    IfPm3Iso14443a,   "----------------------- " _CYAN_("operations") " -----------------------"},
+    {"info",        CmdHF_ntag424_info,         IfPm3Iso14443a,   "Tag information"},
+    {"ndefread", CmdHF_ntag424_sdm,             IfPm3Iso14443a,   "Not implemented"},
+    {"ndefread",    CmdHF_ntag424_ndefread,     IfPm3Iso14443a,   "Prints NDEF records from card"},
+    {"view",        CmdHF_ntag424_view,         AlwaysAvailable,  "Display content from tag dump file"},
     {NULL, NULL, NULL, NULL}
 };
 
